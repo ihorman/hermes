@@ -1,5 +1,5 @@
 type: install
-version: 1.2
+version: 2.0
 
 name: Hermes Agent
 displayName: Hermes Agent
@@ -16,16 +16,12 @@ globals:
   gatewayToken: ha_${fn.uuid}
   gatewayPassword: pw_${fn.password}
   publicPort: 80
-  containerPort: 8642
-  stateDir: /data/hermes
   hermesVersion: latest
-  runtimeImage: hermes-py:3.11-slim
-  runtimeSource: docker.io/library/python:3.11-slim
 
 nodes:
   - nodeGroup: cp
     nodeType: docker
-    displayName: Hermes Agent Docker Engine
+    displayName: Hermes Agent
     image: jelastic/docker-ce:latest
     cloudlets: 16
     fixedCloudlets: 1
@@ -34,88 +30,37 @@ nodes:
     isRedeploySupport: true
     ports:
       - ${globals.publicPort}
-    volumes:
-      - /var/lib/docker
-      - ${globals.stateDir}
 
 onInstall:
   - cmd[cp]: |-
       set -eu
 
-      STATE_DIR="${globals.stateDir}"
+      GATEWAY_TOKEN="${globals.gatewayToken}"
+      GATEWAY_PASSWORD="${globals.gatewayPassword}"
       PUBLIC_PORT="${globals.publicPort}"
-      CONTAINER_PORT="${globals.containerPort}"
-      RUNTIME_IMAGE="${globals.runtimeImage}"
-      RUNTIME_SOURCE="${globals.runtimeSource}"
       HERMES_VERSION="${globals.hermesVersion}"
 
-      install_helper_tools() {
-        if command -v skopeo >/dev/null 2>&1 && command -v curl >/dev/null 2>&1; then
-          return 0
-        fi
+      echo "=== Installing Python 3.11 via Miniconda ==="
+      curl -fsSL https://repo.anaconda.com/miniconda/Miniconda3-latest-Linux-x86_64.sh -o /tmp/miniconda.sh
+      bash /tmp/miniconda.sh -b -p /opt/miniconda
+      rm -f /tmp/miniconda.sh
+      export PATH="/opt/miniconda/bin:$PATH"
 
-        echo "Installing helper tools..."
-        if command -v yum >/dev/null 2>&1; then
-          yum install -y --skip-broken skopeo curl ca-certificates || true
-        elif command -v dnf >/dev/null 2>&1; then
-          dnf install -y --skip-broken skopeo curl ca-certificates || true
-        elif command -v apt-get >/dev/null 2>&1; then
-          apt-get update
-          DEBIAN_FRONTEND=noninteractive apt-get install -y skopeo curl ca-certificates
-        else
-          echo "No supported package manager found. Cannot install skopeo/curl."
-          exit 1
-        fi
+      conda create -y -n hermes python=3.11
+      export PATH="/opt/miniconda/envs/hermes/bin:$PATH"
 
-        command -v skopeo >/dev/null 2>&1 || { echo "skopeo is still unavailable after installation."; exit 1; }
-        command -v curl >/dev/null 2>&1 || { echo "curl is still unavailable after installation."; exit 1; }
-      }
+      echo "=== Installing hermes-agent ==="
+      if [ "${HERMES_VERSION}" = "latest" ]; then
+        pip install hermes-agent
+      else
+        pip install "hermes-agent==${HERMES_VERSION}"
+      fi
 
-      load_runtime_image() {
-        echo "Loading Python runtime image via skopeo..."
-        install_helper_tools
-        tmp_archive="$(mktemp /tmp/hermes-runtime.XXXXXX.tar)"
-        skopeo copy --format v2s2 "docker://${RUNTIME_SOURCE}" "docker-archive:${tmp_archive}:${RUNTIME_IMAGE}"
-        docker load -i "${tmp_archive}"
-        rm -f "${tmp_archive}"
-      }
-
-      echo "Waiting for Docker Engine..."
-      for i in $(seq 1 60); do
-        if docker info >/dev/null 2>&1; then
-          break
-        fi
-        sleep 2
-      done
-      docker info >/dev/null
-
-      echo "Preparing persistent directories..."
-      mkdir -p "${STATE_DIR}/data"
-
-      load_runtime_image
-
-      echo "Writing entrypoint script..."
-      cat > "${STATE_DIR}/entrypoint.sh" <<'ENTRYEOF'
-      #!/bin/sh
-      set -eu
-
+      echo "=== Configuring Hermes ==="
       HERMES_HOME="/root/.hermes"
-
-      echo "[entrypoint] Installing Node.js 22..."
-      apt-get update -qq >/dev/null 2>&1
-      DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends \
-        curl git ca-certificates >/dev/null 2>&1
-      curl -fsSL https://deb.nodesource.com/setup_22.x | bash - >/dev/null 2>&1
-      DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends nodejs >/dev/null 2>&1
-
-      echo "[entrypoint] Installing uv + hermes-agent..."
-      curl -LsSf https://astral.sh/uv/install.sh | sh >/dev/null 2>&1
-      export PATH="/root/.local/bin:$PATH"
-      uv tool install hermes-agent__HERMES_VERSION_SUFFIX__
-
       mkdir -p "${HERMES_HOME}"
 
-      cat > "${HERMES_HOME}/config.yaml" <<CFGEOF
+      cat > "${HERMES_HOME}/config.yaml" <<'CFGEOF'
       model:
         default: openrouter/auto
         provider: openrouter
@@ -140,63 +85,39 @@ onInstall:
           enabled: true
           extra:
             host: 0.0.0.0
-            port: __CONTAINER_PORT__
+            port: __PUBLIC_PORT__
             key: __GATEWAY_TOKEN__
             cors_origins: '*'
             model_name: hermes-agent
       CFGEOF
 
+      # Inject real values
+      sed -i "s|__PUBLIC_PORT__|${PUBLIC_PORT}|g" "${HERMES_HOME}/config.yaml"
+      sed -i "s|__GATEWAY_TOKEN__|${GATEWAY_TOKEN}|g" "${HERMES_HOME}/config.yaml"
+
       cat > "${HERMES_HOME}/.env" <<ENVEOF
-      OPENROUTER_API_KEY=${OPENROUTER_API_KEY:-}
-      ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
-      OPENAI_API_KEY=${OPENAI_API_KEY:-}
-      GEMINI_API_KEY=${GEMINI_API_KEY:-}
+      OPENROUTER_API_KEY=${settings.openrouterApiKey:-}
+      ANTHROPIC_API_KEY=${settings.anthropicApiKey:-}
+      OPENAI_API_KEY=${settings.openaiApiKey:-}
+      GEMINI_API_KEY=${settings.geminiApiKey:-}
       ENVEOF
 
-      echo "[entrypoint] Starting Hermes Agent gateway..."
-      exec hermes gateway run
-      ENTRYEOF
-      chmod +x "${STATE_DIR}/entrypoint.sh"
+      echo "=== Starting Hermes Agent ==="
+      export HERMES_HOME="/root/.hermes"
+      nohup hermes gateway run > /var/log/hermes-gateway.log 2>&1 &
+      echo $! > /var/run/hermes-gateway.pid
 
-      # Inject real values into entrypoint (safe from JPS expansion)
-      sed -i "s|__GATEWAY_TOKEN__|${globals.gatewayToken}|g" "${STATE_DIR}/entrypoint.sh"
-      sed -i "s|__CONTAINER_PORT__|${globals.containerPort}|g" "${STATE_DIR}/entrypoint.sh"
-
-      if [ "${HERMES_VERSION}" = "latest" ]; then
-        sed -i "s|__HERMES_VERSION_SUFFIX__||g" "${STATE_DIR}/entrypoint.sh"
-      else
-        sed -i "s|__HERMES_VERSION_SUFFIX__|==${HERMES_VERSION}|g" "${STATE_DIR}/entrypoint.sh"
-      fi
-
-      echo "Stopping old container if present..."
-      docker rm -f hermes >/dev/null 2>&1 || true
-
-      echo "Starting Hermes Agent..."
-      docker run -d \
-        --name hermes \
-        --restart unless-stopped \
-        -u root \
-        -p "${PUBLIC_PORT}:${CONTAINER_PORT}" \
-        -v "${STATE_DIR}/data:/root/.hermes" \
-        -v "${STATE_DIR}/entrypoint.sh:/entrypoint.sh:ro" \
-        -e OPENROUTER_API_KEY="${settings.openrouterApiKey:-}" \
-        -e ANTHROPIC_API_KEY="${settings.anthropicApiKey:-}" \
-        -e OPENAI_API_KEY="${settings.openaiApiKey:-}" \
-        -e GEMINI_API_KEY="${settings.geminiApiKey:-}" \
-        "${RUNTIME_IMAGE}" \
-        sh /entrypoint.sh
-
-      echo "Waiting for Hermes Agent to respond (installing deps, ~5 min)..."
-      for i in $(seq 1 300); do
+      echo "Waiting for Hermes Agent to respond..."
+      for i in $(seq 1 120); do
         if curl -fsS "http://127.0.0.1:${PUBLIC_PORT}/health" >/dev/null 2>&1; then
-          echo "Hermes Agent is UP after ${i}x2 seconds"
+          echo "Hermes Agent is UP after $((i*2)) seconds"
           break
         fi
         sleep 2
       done
 
-      curl -fsS "http://127.0.0.1:${PUBLIC_PORT}/health" 2>&1 || echo "Health check not yet available — check container logs: docker logs hermes"
-      docker ps --filter name=hermes
+      curl -fsS "http://127.0.0.1:${PUBLIC_PORT}/health" 2>&1 || echo "Health check not yet available"
+      echo "PID: $(cat /var/run/hermes-gateway.pid 2>/dev/null || echo 'unknown')"
 
 settings:
   - name: OpenRouter API Key
@@ -226,15 +147,22 @@ addons:
     onInstall:
       - cmd[cp]: |-
           set -eu
-          docker exec hermes sh -lc 'export PATH="/root/.local/bin:$PATH" && uv tool upgrade hermes-agent'
-          docker restart hermes
-          for i in $(seq 1 120); do
-            if docker exec hermes sh -lc 'hermes --version' >/dev/null 2>&1; then
+          export PATH="/opt/miniconda/envs/hermes/bin:/opt/miniconda/bin:$PATH"
+          pip install --upgrade hermes-agent
+          if [ -f /var/run/hermes-gateway.pid ]; then
+            kill "$(cat /var/run/hermes-gateway.pid)" 2>/dev/null || true
+            sleep 2
+          fi
+          export HERMES_HOME="/root/.hermes"
+          nohup hermes gateway run > /var/log/hermes-gateway.log 2>&1 &
+          echo $! > /var/run/hermes-gateway.pid
+          for i in $(seq 1 60); do
+            if curl -fsS "http://127.0.0.1:${globals.publicPort}/health" >/dev/null 2>&1; then
               break
             fi
             sleep 2
           done
-          docker exec hermes sh -lc 'hermes --version' || true
+          hermes --version || true
 
 startPage: https://${env.domain}/
 
@@ -284,9 +212,7 @@ success: |
   NOTES:
 
   * Default model is openrouter/auto (200+ models via OpenRouter).
-  * Set your API keys in the install settings or edit the .env file inside the container.
+  * Set your API keys in the install settings or edit ~/.hermes/.env on the node.
   * The Add-ons tab includes an "Update Hermes to Latest" action for upgrades.
   * Built-in SSL is enabled.
-  * The node does not use a public IP.
-  * Docker restart policy is set to unless-stopped.
-  * First start takes ~5 minutes (installing Node.js + uv + hermes-agent inside container).
+  * First start takes ~3-5 minutes (installing Miniconda + Python 3.11 + hermes-agent).
