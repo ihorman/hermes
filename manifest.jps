@@ -19,8 +19,8 @@ globals:
   containerPort: 8642
   stateDir: /data/hermes
   hermesVersion: latest
-  runtimeImage: hermes-py:3.11-slim
-  runtimeSource: docker.io/library/python:3.11-slim
+  runtimeImage: hermes-py:3.12-alpine
+  runtimeSource: docker.io/library/python:3.12-alpine
 
 nodes:
   - nodeGroup: cp
@@ -63,8 +63,7 @@ onInstall:
       #!/bin/sh
       set -eu
       echo "[start] Installing curl + git..."
-      apt-get update -qq || true
-      apt-get install -y -qq --no-install-recommends curl git ca-certificates || true
+      apk add --no-cache curl git ca-certificates || true
       if ! command -v curl >/dev/null 2>&1; then
         echo "[start] ERROR: curl not installed"
         exit 1
