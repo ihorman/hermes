@@ -1,15 +1,15 @@
 type: install
 version: 1.0
-name: diagnostics
+name: hermesdiag
 onInstall:
   - cmd[cp]: |-
-      echo "=== Docker ps ==="
-      docker ps -a
-      echo "=== Docker logs hermes ==="
-      docker logs hermes --tail 30 2>&1
-      echo "=== Port check ==="
-      ss -tlnp 2>/dev/null | grep ":80 " || netstat -tlnp 2>/dev/null | grep ":80 " || echo "no :80 listener found"
-      echo "=== Curl localhost:80 ==="
-      curl -sS --max-time 5 http://127.0.0.1:80/health 2>&1 || echo "localhost:80 FAILED"
-      echo "=== Curl localhost:8642 ==="
-      curl -sS --max-time 5 http://127.0.0.1:8642/health 2>&1 || echo "localhost:8642 FAILED"
+      echo "=== config.yaml ==="
+      docker exec hermes cat /root/.hermes/config.yaml 2>&1
+      echo "=== .env ==="
+      docker exec hermes cat /root/.hermes/.env 2>&1
+      echo "=== processes ==="
+      docker exec hermes ps aux 2>&1
+      echo "=== port 8642 ==="
+      docker exec hermes sh -c 'ss -tlnp 2>/dev/null | grep 8642 || netstat -tlnp 2>/dev/null | grep 8642' 2>&1
+      echo "=== port 80 inside ==="
+      docker exec hermes sh -c 'curl -sS --max-time 3 http://127.0.0.1:8642/health' 2>&1 || echo "FAILED"
