@@ -1,5 +1,5 @@
 type: install
-version: 1.0
+version: 1.1
 
 name: Hermes Agent
 displayName: Hermes Agent
@@ -18,9 +18,7 @@ globals:
   publicPort: 80
   containerPort: 8642
   stateDir: /data/hermes
-  hermesVersion: latest
-  runtimeImage: hermes-python-node:3.11-22-slim
-  runtimeSource: docker.io/library/python:3.11-slim
+  runtimeImage: python:3.11-slim
 
 nodes:
   - nodeGroup: cp
@@ -46,63 +44,6 @@ onInstall:
       PUBLIC_PORT="${globals.publicPort}"
       CONTAINER_PORT="${globals.containerPort}"
       RUNTIME_IMAGE="${globals.runtimeImage}"
-      RUNTIME_SOURCE="${globals.runtimeSource}"
-
-      install_helper_tools() {
-        if command -v skopeo >/dev/null 2>&1 && command -v curl >/dev/null 2>&1; then
-          return 0
-        fi
-
-        echo "Installing helper tools..."
-        if command -v yum >/dev/null 2>&1; then
-          yum install -y --skip-broken skopeo curl ca-certificates || true
-        elif command -v dnf >/dev/null 2>&1; then
-          dnf install -y --skip-broken skopeo curl ca-certificates || true
-        elif command -v apt-get >/dev/null 2>&1; then
-          apt-get update
-          DEBIAN_FRONTEND=noninteractive apt-get install -y skopeo curl ca-certificates
-        else
-          echo "No supported package manager found. Cannot install skopeo/curl."
-          exit 1
-        fi
-
-        command -v skopeo >/dev/null 2>&1 || { echo "skopeo is still unavailable after installation."; exit 1; }
-        command -v curl >/dev/null 2>&1 || { echo "curl is still unavailable after installation."; exit 1; }
-      }
-
-      load_runtime_image() {
-        echo "Building Hermes runtime image..."
-        install_helper_tools
-
-        tmp_dir="$(mktemp -d /tmp/hermes-build.XXXXXX)"
-        cat > "${tmp_dir}/Dockerfile" <<'DOCKERFILE'
-      FROM docker.io/library/python:3.11-slim
-
-      RUN apt-get update && \
-          DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-            curl git ca-certificates && \
-          curl -fsSL https://deb.nodesource.com/setup_22.x | bash - && \
-          DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends nodejs && \
-          apt-get clean && rm -rf /var/lib/apt/lists/*
-
-      RUN curl -LsSf https://astral.sh/uv/install.sh | sh && \
-          ln -s /root/.local/bin/uv /usr/local/bin/uv && \
-          ln -s /root/.local/bin/uvx /usr/local/bin/uvx
-
-      RUN uv tool install hermes-agent
-
-      ENV HERMES_HOME=/root/.hermes
-      ENV PATH="/root/.local/bin:/usr/local/bin:$${PATH}"
-
-      VOLUME ["/root/.hermes"]
-      EXPOSE 8642
-
-      CMD ["hermes", "gateway", "run"]
-      DOCKERFILE
-
-        docker build -t "${RUNTIME_IMAGE}" "${tmp_dir}"
-        rm -rf "${tmp_dir}"
-      }
 
       echo "Waiting for Docker Engine..."
       for i in $(seq 1 60); do
@@ -114,25 +55,39 @@ onInstall:
       docker info >/dev/null
 
       echo "Preparing persistent directories..."
-      mkdir -p "${STATE_DIR}/config" "${STATE_DIR}/data"
+      mkdir -p "${STATE_DIR}/data"
 
-      load_runtime_image
+      echo "Pulling Python runtime image..."
+      docker pull "${RUNTIME_IMAGE}"
 
-      echo "Writing startup script..."
-      cat > "${STATE_DIR}/start.sh" <<'EOF'
+      echo "Writing entrypoint script..."
+      cat > "${STATE_DIR}/entrypoint.sh" <<'ENTRYEOF'
       #!/bin/sh
       set -eu
 
-      GATEWAY_TOKEN="${globals.gatewayToken}"
-      GATEWAY_PASSWORD="${globals.gatewayPassword}"
-      PUBLIC_PORT="${PUBLIC_PORT}"
-      CONTAINER_PORT="${CONTAINER_PORT}"
+      HERMES_HOME="/root/.hermes"
 
-      export HERMES_HOME="/root/.hermes"
+      echo "[entrypoint] Installing system dependencies..."
+      apt-get update -qq >/dev/null 2>&1
+      DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends \
+        curl git ca-certificates >/dev/null 2>&1
 
-      mkdir -p "${HERMES_HOME}/profiles/default"
+      echo "[entrypoint] Installing Node.js 22..."
+      curl -fsSL https://deb.nodesource.com/setup_22.x | bash - >/dev/null 2>&1
+      DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends nodejs >/dev/null 2>&1
 
-      # Write config.yaml
+      echo "[entrypoint] Installing uv..."
+      curl -LsSf https://astral.sh/uv/install.sh | sh >/dev/null 2>&1
+      export PATH="/root/.local/bin:$PATH"
+
+      echo "[entrypoint] Installing hermes-agent..."
+      uv tool install hermes-agent
+
+      mkdir -p "${HERMES_HOME}"
+
+      GATEWAY_TOKEN="__GATEWAY_TOKEN__"
+      CONTAINER_PORT="__CONTAINER_PORT__"
+
       cat > "${HERMES_HOME}/config.yaml" <<CFGEOF
       model:
         default: openrouter/auto
@@ -164,7 +119,6 @@ onInstall:
             model_name: hermes-agent
       CFGEOF
 
-      # Write .env with API keys from JPS settings
       cat > "${HERMES_HOME}/.env" <<ENVEOF
       OPENROUTER_API_KEY=${OPENROUTER_API_KEY:-}
       ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
@@ -172,47 +126,43 @@ onInstall:
       GEMINI_API_KEY=${GEMINI_API_KEY:-}
       ENVEOF
 
-      # Update uv-installed hermes if requested
-      if [ -n "${HERMES_VERSION:-}" ] && [ "${HERMES_VERSION}" != "latest" ]; then
-        uv tool install "hermes-agent==${HERMES_VERSION}" || true
-      elif [ "${HERMES_UPDATE_ON_START:-}" = "true" ]; then
-        uv tool upgrade hermes-agent || true
-      fi
-
-      echo "Hermes Agent starting on port ${CONTAINER_PORT}..."
+      echo "[entrypoint] Starting Hermes Agent gateway..."
       exec hermes gateway run
-      EOF
-      chmod +x "${STATE_DIR}/start.sh"
+      ENTRYEOF
+      chmod +x "${STATE_DIR}/entrypoint.sh"
+
+      # Inject real token value into entrypoint
+      sed -i "s|__GATEWAY_TOKEN__|${globals.gatewayToken}|g" "${STATE_DIR}/entrypoint.sh"
+      sed -i "s|__CONTAINER_PORT__|${globals.containerPort}|g" "${STATE_DIR}/entrypoint.sh"
 
       echo "Stopping old container if present..."
       docker rm -f hermes >/dev/null 2>&1 || true
 
-      echo "Starting Hermes Agent..."
+      echo "Starting Hermes Agent container..."
       docker run -d \
         --name hermes \
         --restart unless-stopped \
         -u root \
         -p "${PUBLIC_PORT}:${CONTAINER_PORT}" \
         -v "${STATE_DIR}/data:/root/.hermes" \
+        -v "${STATE_DIR}/entrypoint.sh:/entrypoint.sh:ro" \
         -e OPENROUTER_API_KEY="${settings.openrouterApiKey:-}" \
         -e ANTHROPIC_API_KEY="${settings.anthropicApiKey:-}" \
         -e OPENAI_API_KEY="${settings.openaiApiKey:-}" \
         -e GEMINI_API_KEY="${settings.geminiApiKey:-}" \
-        -e HERMES_UPDATE_ON_START="${settings.autoUpdate:-false}" \
-        -e PUBLIC_PORT="${PUBLIC_PORT}" \
-        -e CONTAINER_PORT="${CONTAINER_PORT}" \
         "${RUNTIME_IMAGE}" \
-        sh "/data/hermes/start.sh"
+        sh /entrypoint.sh
 
-      echo "Waiting for Hermes Agent to respond..."
-      for i in $(seq 1 180); do
+      echo "Waiting for Hermes Agent to respond (this may take 3-5 minutes)..."
+      for i in $(seq 1 240); do
         if curl -fsS "http://127.0.0.1:${PUBLIC_PORT}/health" >/dev/null 2>&1; then
+          echo "Hermes Agent is UP"
           break
         fi
         sleep 2
       done
 
-      curl -fsS "http://127.0.0.1:${PUBLIC_PORT}/health" 2>&1 || true
+      curl -fsS "http://127.0.0.1:${PUBLIC_PORT}/health" 2>&1 || echo "Health check not yet available"
       docker ps --filter name=hermes
 
 settings:
@@ -236,10 +186,6 @@ settings:
     id: geminiApiKey
     placeholder: AIza...
     tooltip: API key for Google Gemini
-  - name: Auto-update on start
-    type: toggle
-    id: autoUpdate
-    tooltip: Upgrade Hermes Agent to latest version when the container starts
 
 addons:
   - id: update-hermes-latest
@@ -247,7 +193,7 @@ addons:
     onInstall:
       - cmd[cp]: |-
           set -eu
-          docker exec hermes sh -lc 'uv tool upgrade hermes-agent'
+          docker exec hermes sh -lc 'export PATH="/root/.local/bin:$PATH" && uv tool upgrade hermes-agent'
           docker restart hermes
           for i in $(seq 1 120); do
             if docker exec hermes sh -lc 'hermes --version' >/dev/null 2>&1; then
@@ -310,3 +256,4 @@ success: |
   * Built-in SSL is enabled.
   * The node does not use a public IP.
   * Docker restart policy is set to unless-stopped.
+  * First start takes 3-5 minutes (installing Python deps + Node.js + hermes-agent).
