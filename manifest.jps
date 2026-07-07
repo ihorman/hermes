@@ -17,7 +17,7 @@ globals:
   gatewayPassword: pw_${fn.password}
   publicPort: 80
   containerPort: 8642
-  stateDir: /data/hermes
+  stateDir: /tmp/hermes
   hermesVersion: latest
   runtimeImage: hermes-py:3.12-alpine
   runtimeSource: docker.io/library/python:3.12-alpine
@@ -36,13 +36,12 @@ nodes:
       - ${globals.publicPort}
     volumes:
       - /var/lib/docker
-      - ${globals.stateDir}
 
 onInstall:
   - cmd[cp]: |-
       set -eu
       STATE_DIR="${globals.stateDir}"
-      mkdir -p "${STATE_DIR}/data"
+      mkdir -p "${STATE_DIR}"
 
       echo "Waiting for Docker..."
       for i in $(seq 1 60); do docker info >/dev/null 2>&1 && break; sleep 2; done
