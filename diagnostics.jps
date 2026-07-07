@@ -1,11 +1,7 @@
 type: install
 version: 1.0
-name: diag2
+name: simplediag
 onInstall:
   - cmd[cp]: |-
-      echo "=== Full docker logs ==="
-      docker logs hermes 2>&1
-      echo "=== All listening ports ==="
-      docker exec hermes sh -c 'netstat -tlnp 2>/dev/null || ss -tlnp 2>/dev/null'
-      echo "=== start.sh content ==="
-      docker exec hermes cat /start.sh 2>&1
+      docker ps -a
+      docker logs hermes --tail 10
