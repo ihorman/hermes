@@ -71,7 +71,7 @@ onInstall:
       echo "[start] Installing uv + hermes-agent..."
       curl -LsSf https://astral.sh/uv/install.sh | sh >/dev/null 2>&1
       export PATH="/root/.local/bin:$PATH"
-      uv tool install hermes-agent__VER__
+      uv tool install hermes-agent__VER__ --with aiohttp
 
       mkdir -p /root/.hermes
       cat > /root/.hermes/config.yaml <<CFGEOF
