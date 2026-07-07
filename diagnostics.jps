@@ -1,15 +1,11 @@
 type: install
 version: 1.0
-name: hermesdiag
+name: diag2
 onInstall:
   - cmd[cp]: |-
-      echo "=== config.yaml ==="
-      docker exec hermes cat /root/.hermes/config.yaml 2>&1
-      echo "=== .env ==="
-      docker exec hermes cat /root/.hermes/.env 2>&1
-      echo "=== processes ==="
-      docker exec hermes ps aux 2>&1
-      echo "=== port 8642 ==="
-      docker exec hermes sh -c 'ss -tlnp 2>/dev/null | grep 8642 || netstat -tlnp 2>/dev/null | grep 8642' 2>&1
-      echo "=== port 80 inside ==="
-      docker exec hermes sh -c 'curl -sS --max-time 3 http://127.0.0.1:8642/health' 2>&1 || echo "FAILED"
+      echo "=== Full docker logs ==="
+      docker logs hermes 2>&1
+      echo "=== All listening ports ==="
+      docker exec hermes sh -c 'netstat -tlnp 2>/dev/null || ss -tlnp 2>/dev/null'
+      echo "=== start.sh content ==="
+      docker exec hermes cat /start.sh 2>&1
