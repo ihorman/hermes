@@ -1,9 +1,9 @@
 type: install
-version: 3.0
+version: 4.0
 
 name: Hermes Agent
 displayName: Hermes Agent
-description: Hermes Agent by Nous Research with Open WebUI chat interface — persistent memory, skills, multi-platform gateway, and 20+ LLM providers.
+description: Hermes Agent by Nous Research — open-source AI agent with persistent memory, skills, and 20+ LLM providers. OpenAI-compatible API server.
 homepage: https://hermes-agent.nousresearch.com/
 logo: https://raw.githubusercontent.com/NousResearch/hermes-agent/main/website/static/img/logo.png
 categories:
@@ -16,11 +16,10 @@ globals:
   gatewayToken: ha_${fn.uuid}
   gatewayPassword: pw_${fn.password}
   publicPort: 80
-  containerPort: 8080
-  apiPort: 8642
+  containerPort: 8642
   stateDir: /data/hermes
   hermesVersion: latest
-  runtimeImage: hermes-runtime:py3.11
+  runtimeImage: hermes-py:3.11-slim
   runtimeSource: docker.io/library/python:3.11-slim
 
 nodes:
@@ -28,8 +27,8 @@ nodes:
     nodeType: docker
     displayName: Hermes Agent
     image: jelastic/docker-ce:latest
-    cloudlets: 32
-    fixedCloudlets: 4
+    cloudlets: 16
+    fixedCloudlets: 2
     count: 1
     extip: false
     isRedeploySupport: true
@@ -42,208 +41,119 @@ nodes:
 onInstall:
   - cmd[cp]: |-
       set -eu
-
       STATE_DIR="${globals.stateDir}"
-      PUBLIC_PORT="${globals.publicPort}"
-      CONTAINER_PORT="${globals.containerPort}"
-      API_PORT="${globals.apiPort}"
-      RUNTIME_IMAGE="${globals.runtimeImage}"
-      RUNTIME_SOURCE="${globals.runtimeSource}"
+      mkdir -p "${STATE_DIR}/data"
 
-      install_helper_tools() {
-        if command -v skopeo >/dev/null 2>&1 && command -v curl >/dev/null 2>&1; then
-          return 0
-        fi
+      echo "Waiting for Docker..."
+      for i in $(seq 1 60); do docker info >/dev/null 2>&1 && break; sleep 2; done
 
-        echo "Installing helper tools..."
-        if command -v yum >/dev/null 2>&1; then
-          yum install -y --skip-broken skopeo curl ca-certificates || true
-        elif command -v dnf >/dev/null 2>&1; then
-          dnf install -y --skip-broken skopeo curl ca-certificates || true
-        elif command -v apt-get >/dev/null 2>&1; then
-          apt-get update
-          DEBIAN_FRONTEND=noninteractive apt-get install -y skopeo curl ca-certificates
-        else
-          echo "No supported package manager found. Cannot install skopeo/curl."
-          exit 1
-        fi
+      echo "Loading Python image via skopeo..."
+      if command -v skopeo >/dev/null 2>&1; then
+        true
+      elif command -v yum >/dev/null 2>&1; then
+        yum install -y --skip-broken skopeo curl ca-certificates || true
+      fi
+      tmp_archive="$(mktemp /tmp/hermes.XXXXXX.tar)"
+      skopeo copy --format v2s2 "docker://${globals.runtimeSource}" "docker-archive:${tmp_archive}:${globals.runtimeImage}"
+      docker load -i "${tmp_archive}"
+      rm -f "${tmp_archive}"
 
-        command -v skopeo >/dev/null 2>&1 || { echo "skopeo is still unavailable after installation."; exit 1; }
-        command -v curl >/dev/null 2>&1 || { echo "curl is still unavailable after installation."; exit 1; }
-      }
-
-      load_runtime_image() {
-        echo "Loading Python runtime image via skopeo..."
-        install_helper_tools
-        tmp_archive="$(mktemp /tmp/hermes-runtime.XXXXXX.tar)"
-        skopeo copy --format v2s2 "docker://${RUNTIME_SOURCE}" "docker-archive:${tmp_archive}:${RUNTIME_IMAGE}"
-        docker load -i "${tmp_archive}"
-        rm -f "${tmp_archive}"
-      }
-
-      echo "Waiting for Docker Engine..."
-      for i in $(seq 1 60); do
-        if docker info >/dev/null 2>&1; then
-          break
-        fi
-        sleep 2
-      done
-      docker info >/dev/null
-
-      echo "Preparing persistent directories..."
-      mkdir -p "${STATE_DIR}/data" "${STATE_DIR}/logs"
-
-      load_runtime_image
-
-      echo "Writing entrypoint script..."
-      cat > "${STATE_DIR}/entrypoint.sh" <<'ENTRYEOF'
-      #!/bin/bash
+      echo "Writing start.sh..."
+      cat > "${STATE_DIR}/start.sh" <<'EOF'
+      #!/bin/sh
       set -eu
+      echo "[start] Installing curl + git..."
+      apt-get update -qq && apt-get install -y -qq --no-install-recommends curl git ca-certificates >/dev/null 2>&1
 
-      HERMES_HOME="/root/.hermes"
-      LOGFILE="/var/log/hermes-init.log"
-
-      exec > >(tee -a "$LOGFILE") 2>&1
-
-      echo "[entrypoint] $(date) Starting initialization..."
-
-      echo "[entrypoint] Installing system dependencies..."
-      apt-get update -qq >/dev/null 2>&1
-      DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends \
-        curl git ca-certificates build-essential >/dev/null 2>&1
-
-      echo "[entrypoint] Installing Node.js 22..."
-      curl -fsSL https://deb.nodesource.com/setup_22.x | bash - >/dev/null 2>&1
-      DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends nodejs >/dev/null 2>&1
-
-      echo "[entrypoint] Installing uv..."
+      echo "[start] Installing uv + hermes-agent..."
       curl -LsSf https://astral.sh/uv/install.sh | sh >/dev/null 2>&1
       export PATH="/root/.local/bin:$PATH"
+      uv tool install hermes-agent__VER__
 
-      echo "[entrypoint] Installing hermes-agent..."
-      uv tool install hermes-agent__HERMES_VERSION_SUFFIX__
-
-      echo "[entrypoint] Installing Open WebUI..."
-      pip install open-webui
-
-      mkdir -p "${HERMES_HOME}"
-
-      echo "[entrypoint] Writing Hermes config..."
-      cat > "${HERMES_HOME}/config.yaml" <<CFGEOF
+      mkdir -p /root/.hermes
+      cat > /root/.hermes/config.yaml <<CFGEOF
       model:
         default: openrouter/auto
         provider: openrouter
-
       agent:
         max_turns: 90
-
       terminal:
         timeout: 300
-
       compression:
         enabled: true
         threshold: 0.50
         target_ratio: 0.20
-
       memory:
         memory_enabled: true
         user_profile_enabled: true
-
       platforms:
         api_server:
           enabled: true
           extra:
-            host: 127.0.0.1
-            port: __API_PORT__
-            key: __GATEWAY_TOKEN__
+            host: 0.0.0.0
+            port: __PORT__
+            key: __TOKEN__
             cors_origins: '*'
             model_name: hermes-agent
       CFGEOF
 
-      cat > "${HERMES_HOME}/.env" <<ENVEOF
+      cat > /root/.hermes/.env <<ENVEOF
       OPENROUTER_API_KEY=${OPENROUTER_API_KEY:-}
       ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
       OPENAI_API_KEY=${OPENAI_API_KEY:-}
       GEMINI_API_KEY=${GEMINI_API_KEY:-}
       ENVEOF
 
-      echo "[entrypoint] Starting Hermes gateway in background..."
-      export HERMES_HOME
-      nohup hermes gateway run > /var/log/hermes-gateway.log 2>&1 &
-      HERMES_PID=$!
-      echo "${HERMES_PID}" > /var/run/hermes.pid
-      echo "[entrypoint] Hermes gateway PID: ${HERMES_PID}"
+      echo "[start] Launching hermes gateway..."
+      exec hermes gateway run
+      EOF
 
-      echo "[entrypoint] Waiting for Hermes API to be ready..."
-      for i in $(seq 1 90); do
-        if curl -fsS "http://127.0.0.1:__API_PORT__/health" >/dev/null 2>&1; then
-          echo "[entrypoint] Hermes API is UP after $((i*2))s"
-          break
-        fi
-        sleep 2
-      done
+      chmod +x "${STATE_DIR}/start.sh"
 
-      echo "[entrypoint] Starting Open WebUI on port __CONTAINER_PORT__..."
-      export OPENAI_API_BASE_URL="http://127.0.0.1:__API_PORT__/v1"
-      export OPENAI_API_KEY="__GATEWAY_TOKEN__"
-      export WEBUI_SECRET_KEY="__GATEWAY_PASSWORD__"
-      export PORT="__CONTAINER_PORT__"
-      export HOST="0.0.0.0"
-
-      exec open-webui serve --port __CONTAINER_PORT__ --host 0.0.0.0
-      ENTRYEOF
-      chmod +x "${STATE_DIR}/entrypoint.sh"
-
-      # Inject real values
-      sed -i "s|__GATEWAY_TOKEN__|${globals.gatewayToken}|g" "${STATE_DIR}/entrypoint.sh"
-      sed -i "s|__GATEWAY_PASSWORD__|${globals.gatewayPassword}|g" "${STATE_DIR}/entrypoint.sh"
-      sed -i "s|__CONTAINER_PORT__|${globals.containerPort}|g" "${STATE_DIR}/entrypoint.sh"
-      sed -i "s|__API_PORT__|${globals.apiPort}|g" "${STATE_DIR}/entrypoint.sh"
-
+      # Inject real values via sed
+      sed -i "s|__TOKEN__|${globals.gatewayToken}|g" "${STATE_DIR}/start.sh"
+      sed -i "s|__PORT__|${globals.containerPort}|g" "${STATE_DIR}/start.sh"
       if [ "${globals.hermesVersion}" = "latest" ]; then
-        sed -i "s|__HERMES_VERSION_SUFFIX__||g" "${STATE_DIR}/entrypoint.sh"
+        sed -i "s|__VER__||g" "${STATE_DIR}/start.sh"
       else
-        sed -i "s|__HERMES_VERSION_SUFFIX__|==${globals.hermesVersion}|g" "${STATE_DIR}/entrypoint.sh"
+        sed -i "s|__VER__|==${globals.hermesVersion}|g" "${STATE_DIR}/start.sh"
       fi
 
-      echo "Stopping old container if present..."
       docker rm -f hermes >/dev/null 2>&1 || true
 
-      echo "Starting Hermes Agent + Open WebUI..."
+      echo "Starting container..."
       docker run -d \
         --name hermes \
         --restart unless-stopped \
         -u root \
-        -p "${PUBLIC_PORT}:${CONTAINER_PORT}" \
+        -p "${globals.publicPort}:${globals.containerPort}" \
         -v "${STATE_DIR}/data:/root/.hermes" \
-        -v "${STATE_DIR}/logs:/var/log" \
-        -v "${STATE_DIR}/entrypoint.sh:/entrypoint.sh:ro" \
+        -v "${STATE_DIR}/start.sh:/start.sh:ro" \
         -e OPENROUTER_API_KEY="${settings.openrouterApiKey:-}" \
         -e ANTHROPIC_API_KEY="${settings.anthropicApiKey:-}" \
         -e OPENAI_API_KEY="${settings.openaiApiKey:-}" \
         -e GEMINI_API_KEY="${settings.geminiApiKey:-}" \
-        "${RUNTIME_IMAGE}" \
-        bash /entrypoint.sh
+        "${globals.runtimeImage}" \
+        sh /start.sh
 
-      echo "Container started. Initialization will take 5-10 minutes."
-      echo "Progress can be checked via: docker exec hermes cat /var/log/hermes-init.log"
+      echo "Done. Container is starting — hermes gateway will be ready in ~3 minutes."
 
 settings:
   - name: OpenRouter API Key
     type: string
     id: openrouterApiKey
     placeholder: sk-or-...
-    tooltip: API key for OpenRouter (recommended — gives access to 200+ models)
+    tooltip: API key for OpenRouter (recommended — 200+ models)
   - name: Anthropic API Key
     type: string
     id: anthropicApiKey
     placeholder: sk-ant-...
-    tooltip: API key for Anthropic (Claude models)
+    tooltip: API key for Anthropic (Claude)
   - name: OpenAI API Key
     type: string
     id: openaiApiKey
     placeholder: sk-...
-    tooltip: API key for OpenAI (GPT models)
+    tooltip: API key for OpenAI
   - name: Google Gemini API Key
     type: string
     id: geminiApiKey
@@ -262,39 +172,18 @@ addons:
 startPage: https://${env.domain}/
 
 success: |
-  Hermes Agent has been installed with Open WebUI.
+  Hermes Agent has been installed.
 
-  ═══════════════════════════════════════
-  ACCESS CARD
-  ═══════════════════════════════════════
+  API endpoint:  https://${env.domain}/v1
+  Token:         ${globals.gatewayPassword}
+  Health:        https://${env.domain}/health
+  Models:        https://${env.domain}/v1/models
 
-  Chat UI (Open WebUI):
-    https://${env.domain}/
+  curl test:
+    curl -sS https://${env.domain}/v1/chat/completions \
+      -H "Authorization: Bearer ${globals.gatewayToken}" \
+      -H 'Content-Type: application/json' \
+      -d '{"model":"hermes-agent","messages":[{"role":"user","content":"Hello!"}]}'
 
-  API endpoint:
-    https://${env.domain}/v1
-
-  Gateway token (bearer key):
-    ${globals.gatewayToken}
-
-  Health check:
-    https://${env.domain}/health
-
-  ═══════════════════════════════════════
-
-  Keep these values somewhere safe.
-
-  HOW TO USE:
-
-  * Chat — open https://${env.domain}/ in your browser
-  * API — Base URL: https://${env.domain}/v1, API Key: ${globals.gatewayToken}
-  * First user to register gets admin access in Open WebUI
-
-  NOTES:
-
-  * Default model is openrouter/auto (200+ models via OpenRouter).
-  * Set your API keys in the install settings.
-  * The Add-ons tab includes an "Update Hermes to Latest" action.
-  * Built-in SSL is enabled.
-  * First start takes 5-10 minutes (installing Python deps + Node.js + hermes-agent + Open WebUI).
-  * Check init progress: docker exec hermes cat /var/log/hermes-init.log
+  Default model: openrouter/auto (200+ models). Set API keys in install settings.
+  Gateway will be ready ~3 min after install. Add-ons tab has "Update to Latest".
