@@ -131,7 +131,7 @@ onInstall:
         --restart unless-stopped \
         -u root \
         -p "${globals.publicPort}:${globals.containerPort}" \
-        --tmpfs /root:rw,size=512m \
+        --tmpfs /root/.hermes:rw,size=256m,exec \
         -v "${STATE_DIR}/start.sh:/start.sh:ro" \
         -e OPENROUTER_API_KEY="${settings.openrouterApiKey:-}" \
         -e ANTHROPIC_API_KEY="${settings.anthropicApiKey:-}" \
