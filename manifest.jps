@@ -64,7 +64,11 @@ onInstall:
       set -eu
       echo "[start] Installing curl + git..."
       apt-get update -qq || true
-      apt-get install -y -qq --no-install-recommends curl git ca-certificates
+      apt-get install -y -qq --no-install-recommends curl git ca-certificates || true
+      if ! command -v curl >/dev/null 2>&1; then
+        echo "[start] ERROR: curl not installed"
+        exit 1
+      fi
 
       echo "[start] Installing uv + hermes-agent..."
       curl -LsSf https://astral.sh/uv/install.sh | sh >/dev/null 2>&1
