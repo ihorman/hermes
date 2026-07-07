@@ -1,0 +1,312 @@
+type: install
+version: 1.0
+
+name: Hermes Agent
+displayName: Hermes Agent
+description: Hermes Agent is an open-source AI agent by Nous Research — persistent memory, skills, multi-platform gateway, and 20+ LLM providers. Runs as an OpenAI-compatible API server.
+homepage: https://hermes-agent.nousresearch.com/
+logo: https://raw.githubusercontent.com/NousResearch/hermes-agent/main/website/static/img/logo.png
+categories:
+  - apps/dev-and-admin-tools
+
+ssl: true
+skipNodeEmails: true
+
+globals:
+  gatewayToken: ha_${fn.uuid}
+  gatewayPassword: pw_${fn.password}
+  publicPort: 80
+  containerPort: 8642
+  stateDir: /data/hermes
+  hermesVersion: latest
+  runtimeImage: hermes-python-node:3.11-22-slim
+  runtimeSource: docker.io/library/python:3.11-slim
+
+nodes:
+  - nodeGroup: cp
+    nodeType: docker
+    displayName: Hermes Agent Docker Engine
+    image: jelastic/docker-ce:latest
+    cloudlets: 16
+    fixedCloudlets: 1
+    count: 1
+    extip: false
+    isRedeploySupport: true
+    ports:
+      - ${globals.publicPort}
+    volumes:
+      - /var/lib/docker
+      - ${globals.stateDir}
+
+onInstall:
+  - cmd[cp]: |-
+      set -eu
+
+      STATE_DIR="${globals.stateDir}"
+      PUBLIC_PORT="${globals.publicPort}"
+      CONTAINER_PORT="${globals.containerPort}"
+      RUNTIME_IMAGE="${globals.runtimeImage}"
+      RUNTIME_SOURCE="${globals.runtimeSource}"
+
+      install_helper_tools() {
+        if command -v skopeo >/dev/null 2>&1 && command -v curl >/dev/null 2>&1; then
+          return 0
+        fi
+
+        echo "Installing helper tools..."
+        if command -v yum >/dev/null 2>&1; then
+          yum install -y --skip-broken skopeo curl ca-certificates || true
+        elif command -v dnf >/dev/null 2>&1; then
+          dnf install -y --skip-broken skopeo curl ca-certificates || true
+        elif command -v apt-get >/dev/null 2>&1; then
+          apt-get update
+          DEBIAN_FRONTEND=noninteractive apt-get install -y skopeo curl ca-certificates
+        else
+          echo "No supported package manager found. Cannot install skopeo/curl."
+          exit 1
+        fi
+
+        command -v skopeo >/dev/null 2>&1 || { echo "skopeo is still unavailable after installation."; exit 1; }
+        command -v curl >/dev/null 2>&1 || { echo "curl is still unavailable after installation."; exit 1; }
+      }
+
+      load_runtime_image() {
+        echo "Building Hermes runtime image..."
+        install_helper_tools
+
+        tmp_dir="$(mktemp -d /tmp/hermes-build.XXXXXX)"
+        cat > "${tmp_dir}/Dockerfile" <<'DOCKERFILE'
+      FROM docker.io/library/python:3.11-slim
+
+      RUN apt-get update && \
+          DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+            curl git ca-certificates && \
+          curl -fsSL https://deb.nodesource.com/setup_22.x | bash - && \
+          DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends nodejs && \
+          apt-get clean && rm -rf /var/lib/apt/lists/*
+
+      RUN curl -LsSf https://astral.sh/uv/install.sh | sh && \
+          ln -s /root/.local/bin/uv /usr/local/bin/uv && \
+          ln -s /root/.local/bin/uvx /usr/local/bin/uvx
+
+      RUN uv tool install hermes-agent
+
+      ENV HERMES_HOME=/root/.hermes
+      ENV PATH="/root/.local/bin:/usr/local/bin:$${PATH}"
+
+      VOLUME ["/root/.hermes"]
+      EXPOSE 8642
+
+      CMD ["hermes", "gateway", "run"]
+      DOCKERFILE
+
+        docker build -t "${RUNTIME_IMAGE}" "${tmp_dir}"
+        rm -rf "${tmp_dir}"
+      }
+
+      echo "Waiting for Docker Engine..."
+      for i in $(seq 1 60); do
+        if docker info >/dev/null 2>&1; then
+          break
+        fi
+        sleep 2
+      done
+      docker info >/dev/null
+
+      echo "Preparing persistent directories..."
+      mkdir -p "${STATE_DIR}/config" "${STATE_DIR}/data"
+
+      load_runtime_image
+
+      echo "Writing startup script..."
+      cat > "${STATE_DIR}/start.sh" <<'EOF'
+      #!/bin/sh
+      set -eu
+
+      GATEWAY_TOKEN="${globals.gatewayToken}"
+      GATEWAY_PASSWORD="${globals.gatewayPassword}"
+      PUBLIC_PORT="${PUBLIC_PORT}"
+      CONTAINER_PORT="${CONTAINER_PORT}"
+
+      export HERMES_HOME="/root/.hermes"
+
+      mkdir -p "${HERMES_HOME}/profiles/default"
+
+      # Write config.yaml
+      cat > "${HERMES_HOME}/config.yaml" <<CFGEOF
+      model:
+        default: openrouter/auto
+        provider: openrouter
+
+      agent:
+        max_turns: 90
+
+      terminal:
+        timeout: 300
+
+      compression:
+        enabled: true
+        threshold: 0.50
+        target_ratio: 0.20
+
+      memory:
+        memory_enabled: true
+        user_profile_enabled: true
+
+      platforms:
+        api_server:
+          enabled: true
+          extra:
+            host: 0.0.0.0
+            port: ${CONTAINER_PORT}
+            key: ${GATEWAY_TOKEN}
+            cors_origins: '*'
+            model_name: hermes-agent
+      CFGEOF
+
+      # Write .env with API keys from JPS settings
+      cat > "${HERMES_HOME}/.env" <<ENVEOF
+      OPENROUTER_API_KEY=${OPENROUTER_API_KEY:-}
+      ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
+      OPENAI_API_KEY=${OPENAI_API_KEY:-}
+      GEMINI_API_KEY=${GEMINI_API_KEY:-}
+      ENVEOF
+
+      # Update uv-installed hermes if requested
+      if [ -n "${HERMES_VERSION:-}" ] && [ "${HERMES_VERSION}" != "latest" ]; then
+        uv tool install "hermes-agent==${HERMES_VERSION}" || true
+      elif [ "${HERMES_UPDATE_ON_START:-}" = "true" ]; then
+        uv tool upgrade hermes-agent || true
+      fi
+
+      echo "Hermes Agent starting on port ${CONTAINER_PORT}..."
+      exec hermes gateway run
+      EOF
+      chmod +x "${STATE_DIR}/start.sh"
+
+      echo "Stopping old container if present..."
+      docker rm -f hermes >/dev/null 2>&1 || true
+
+      echo "Starting Hermes Agent..."
+      docker run -d \
+        --name hermes \
+        --restart unless-stopped \
+        -u root \
+        -p "${PUBLIC_PORT}:${CONTAINER_PORT}" \
+        -v "${STATE_DIR}/data:/root/.hermes" \
+        -e OPENROUTER_API_KEY="${settings.openrouterApiKey:-}" \
+        -e ANTHROPIC_API_KEY="${settings.anthropicApiKey:-}" \
+        -e OPENAI_API_KEY="${settings.openaiApiKey:-}" \
+        -e GEMINI_API_KEY="${settings.geminiApiKey:-}" \
+        -e HERMES_UPDATE_ON_START="${settings.autoUpdate:-false}" \
+        -e PUBLIC_PORT="${PUBLIC_PORT}" \
+        -e CONTAINER_PORT="${CONTAINER_PORT}" \
+        "${RUNTIME_IMAGE}" \
+        sh "/data/hermes/start.sh"
+
+      echo "Waiting for Hermes Agent to respond..."
+      for i in $(seq 1 180); do
+        if curl -fsS "http://127.0.0.1:${PUBLIC_PORT}/health" >/dev/null 2>&1; then
+          break
+        fi
+        sleep 2
+      done
+
+      curl -fsS "http://127.0.0.1:${PUBLIC_PORT}/health" 2>&1 || true
+      docker ps --filter name=hermes
+
+settings:
+  - name: OpenRouter API Key
+    type: string
+    id: openrouterApiKey
+    placeholder: sk-or-...
+    tooltip: API key for OpenRouter (recommended — gives access to 200+ models)
+  - name: Anthropic API Key
+    type: string
+    id: anthropicApiKey
+    placeholder: sk-ant-...
+    tooltip: API key for Anthropic (Claude models)
+  - name: OpenAI API Key
+    type: string
+    id: openaiApiKey
+    placeholder: sk-...
+    tooltip: API key for OpenAI (GPT models)
+  - name: Google Gemini API Key
+    type: string
+    id: geminiApiKey
+    placeholder: AIza...
+    tooltip: API key for Google Gemini
+  - name: Auto-update on start
+    type: toggle
+    id: autoUpdate
+    tooltip: Upgrade Hermes Agent to latest version when the container starts
+
+addons:
+  - id: update-hermes-latest
+    name: Update Hermes to Latest
+    onInstall:
+      - cmd[cp]: |-
+          set -eu
+          docker exec hermes sh -lc 'uv tool upgrade hermes-agent'
+          docker restart hermes
+          for i in $(seq 1 120); do
+            if docker exec hermes sh -lc 'hermes --version' >/dev/null 2>&1; then
+              break
+            fi
+            sleep 2
+          done
+          docker exec hermes sh -lc 'hermes --version' || true
+
+startPage: https://${env.domain}/
+
+success: |
+  Hermes Agent has been installed.
+
+  ═══════════════════════════════════════
+  ACCESS CARD
+  ═══════════════════════════════════════
+
+  API endpoint:
+    https://${env.domain}/v1
+
+  Gateway token (bearer key):
+    ${globals.gatewayToken}
+
+  Password:
+    ${globals.gatewayPassword}
+
+  Health check:
+    https://${env.domain}/health
+
+  Models endpoint:
+    https://${env.domain}/v1/models
+
+  ═══════════════════════════════════════
+
+  Keep these values somewhere safe. The token is your API bearer key.
+
+  HOW TO USE:
+
+  * OpenAI-compatible API — point any OpenAI client to:
+      Base URL:  https://${env.domain}/v1
+      API Key:   ${globals.gatewayToken}
+      Model:     hermes-agent
+
+  * Hermes Desktop — connect in remote mode:
+      URL:       https://${env.domain}
+      Token:     ${globals.gatewayToken}
+
+  * curl test:
+      curl -sS https://${env.domain}/v1/chat/completions \
+        -H "Authorization: Bearer ${globals.gatewayToken}" \
+        -H 'Content-Type: application/json' \
+        -d '{"model":"hermes-agent","messages":[{"role":"user","content":"Hello!"}]}'
+
+  NOTES:
+
+  * Default model is openrouter/auto (200+ models via OpenRouter).
+  * Set your API keys in the install settings or edit the .env file inside the container.
+  * The Add-ons tab includes an "Update Hermes to Latest" action for upgrades.
+  * Built-in SSL is enabled.
+  * The node does not use a public IP.
+  * Docker restart policy is set to unless-stopped.
