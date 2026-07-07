@@ -110,7 +110,13 @@ onInstall:
       echo "[start] Patching hermes_state.py for overlay FS..."
       STATE_PY="/root/.local/share/uv/tools/hermes-agent/lib/python3.12/site-packages/hermes_state.py"
       if [ -f "$STATE_PY" ]; then
-        sed -i 's/"locking protocol"/"locking protocol", "disk i\/o error"/' "$STATE_PY"
+        python3 -c "
+import pathlib
+p = pathlib.Path('$STATE_PY')
+t = p.read_text()
+t = t.replace('\"locking protocol\"', '\"locking protocol\", \"disk i/o error\"')
+p.write_text(t)
+"
       fi
 
       echo "[start] Launching hermes gateway..."
