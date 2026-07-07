@@ -107,6 +107,12 @@ onInstall:
       GEMINI_API_KEY=${GEMINI_API_KEY:-}
       ENVEOF
 
+      echo "[start] Patching hermes_state.py for overlay FS..."
+      STATE_PY="/root/.local/share/uv/tools/hermes-agent/lib/python3.12/site-packages/hermes_state.py"
+      if [ -f "$STATE_PY" ]; then
+        sed -i 's/"locking protocol",/"locking protocol", "disk i/o error",/' "$STATE_PY"
+      fi
+
       echo "[start] Launching hermes gateway..."
       export TMPDIR=/tmp
       exec hermes gateway run
