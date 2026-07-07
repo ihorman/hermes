@@ -131,12 +131,16 @@ onInstall:
         --restart unless-stopped \
         -u root \
         -p "${globals.publicPort}:${globals.containerPort}" \
+        --tmpfs /tmp:rw,size=256m,exec \
         --tmpfs /root/.hermes:rw,size=256m,exec \
         -v "${STATE_DIR}/start.sh:/start.sh:ro" \
         -e OPENROUTER_API_KEY="${settings.openrouterApiKey:-}" \
         -e ANTHROPIC_API_KEY="${settings.anthropicApiKey:-}" \
         -e OPENAI_API_KEY="${settings.openaiApiKey:-}" \
         -e GEMINI_API_KEY="${settings.geminiApiKey:-}" \
+        -e HERMES_HOME="/root/.hermes" \
+        -e TMPDIR="/tmp" \
+        -w "/root/.hermes" \
         "${globals.runtimeImage}" \
         sh /start.sh
 
